@@ -1,0 +1,1380 @@
+// ==UserScript==
+// @name         zynsync汽水音乐下载脚本
+// @namespace    http://tampermonkey.net/
+// @version      4.3
+// @description  别问原理，问就是屎山代码暴力寻找链接并下载😡 修bug给我修崩溃了😡
+// @author       zynsync
+// @match        https://www.qishui.com/*
+// @match        https://*.qishui.com/*
+// @match        https://www.douyin.com/qishui/*
+// @match        https://*.douyin.com/qishui/*
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// @grant        GM_notification
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('看你雷霆😋');
+
+    const CONFIG = {
+        maxSearchTime: 30000,
+        searchInterval: 500,
+        debug: true
+    };
+
+    let audioInfo = {
+        url: null,
+        title: '未知歌曲',
+        artist: '未知艺术家',
+        cover: '',
+        found: false
+    };
+
+    function log(...args) {
+        if (CONFIG.debug) {
+            console.log('📢 [汽水音乐]', ...args);
+        }
+    }
+
+    function isValidMediaUrl(url) {
+        if (!url) return false;
+        const lowerUrl = url.toLowerCase();
+        if (lowerUrl.includes('logo.png') || lowerUrl.includes('favicon') || lowerUrl.includes('.png') || lowerUrl.includes('.jpg') || lowerUrl.includes('.jpeg') || lowerUrl.includes('.gif') || lowerUrl.includes('.webp')) {
+            return false;
+        }
+        if (!lowerUrl.includes('douyinvod.com')) return false;
+        if (lowerUrl.includes('/video/') || lowerUrl.includes('/audio/') || lowerUrl.includes('mime_type=audio_mp4') || lowerUrl.includes('mime_type=video_mp4') || lowerUrl.endsWith('.mp3') || lowerUrl.endsWith('.mp4') || lowerUrl.endsWith('.m4a')) {
+            return true;
+        }
+        return false;
+    }
+
+    function isInvalidCover(url) {
+        if (!url) return true;
+        const lower = url.toLowerCase();
+        const blacklist = ['logo', 'favicon', 'icon', 'placeholder', 'default'];
+        for (let word of blacklist) {
+            if (lower.includes(word)) return true;
+        }
+        return false;
+    }
+
+    function extractCoverFromPage() {
+        let coverUrl = '';
+        const metaOgImage = document.querySelector('meta[property="og:image"]');
+        if (metaOgImage) {
+            const content = metaOgImage.getAttribute('content');
+            if (content && !isInvalidCover(content)) coverUrl = content;
+        }
+        if (!coverUrl) {
+            const metaTwitterImage = document.querySelector('meta[name="twitter:image"]');
+            if (metaTwitterImage) {
+                const content = metaTwitterImage.getAttribute('content');
+                if (content && !isInvalidCover(content)) coverUrl = content;
+            }
+        }
+        if (!coverUrl) {
+            const images = document.querySelectorAll('img');
+            for (let img of images) {
+                if (img.src && (img.src.includes('douyinpic.com') || img.src.includes('qishui'))) {
+                    if (!isInvalidCover(img.src)) {
+                        coverUrl = img.src;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!coverUrl && window._ROUTER_DATA) {
+            try {
+                const trackData = window._ROUTER_DATA?.loaderData?.track_page?.audioWithLyricsOption;
+                if (trackData?.coverURL && !isInvalidCover(trackData.coverURL)) coverUrl = trackData.coverURL;
+                const videoData = window._ROUTER_DATA?.loaderData?.ugc_video_page?.videoOptions;
+                if (videoData?.coverURL && !isInvalidCover(videoData.coverURL)) coverUrl = videoData.coverURL;
+                else if (videoData?.firstFrameURL && !isInvalidCover(videoData.firstFrameURL)) coverUrl = videoData.firstFrameURL;
+            } catch(e) {}
+        }
+        return coverUrl;
+    }
+
+    function extractFromRouterData() {
+        try {
+            if (!window._ROUTER_DATA) return null;
+            const trackPage = window._ROUTER_DATA?.loaderData?.track_page;
+            if (trackPage?.audioWithLyricsOption?.url) {
+                const opt = trackPage.audioWithLyricsOption;
+                return {
+                    url: opt.url,
+                    title: opt.trackName || '未知歌曲',
+                    artist: opt.artistName || '未知艺术家',
+                    cover: opt.coverURL || '',
+                    source: 'track_page'
+                };
+            }
+            const ugcPage = window._ROUTER_DATA?.loaderData?.ugc_video_page;
+            if (ugcPage?.videoOptions?.url) {
+                const opt = ugcPage.videoOptions;
+                return {
+                    url: opt.url,
+                    title: opt.videoName || '未知歌曲',
+                    artist: opt.artistName || '未知艺术家',
+                    cover: opt.coverURL || opt.firstFrameURL || '',
+                    source: 'ugc_video_page'
+                };
+            }
+        } catch(e) {
+            log('解析_ROUTER_DATA失败', e);
+        }
+        return null;
+    }
+
+    function searchAudioInPage() {
+        log('屎山代码正在发力🤔');
+
+        const routerResult = extractFromRouterData();
+        if (routerResult && isValidMediaUrl(routerResult.url)) {
+            audioInfo = {
+                url: routerResult.url,
+                title: routerResult.title,
+                artist: routerResult.artist,
+                cover: routerResult.cover || extractCoverFromPage(),
+                found: true
+            };
+            log('屎山代码匹配成功😋(路由数据):', audioInfo);
+            return true;
+        }
+
+        const results = [];
+        let extractedCover = extractCoverFromPage();
+
+        const scripts = document.querySelectorAll('script');
+        scripts.forEach((script, index) => {
+            const content = script.textContent || script.innerText;
+            if (!content) return;
+
+            if (content.includes('_ROUTER_DATA')) {
+                log(`找到 _ROUTER_DATA 脚本 #${index}`);
+                const routerMatch = content.match(/_ROUTER_DATA\s*=\s*({.*?});/s);
+                if (routerMatch) {
+                    try {
+                        const data = JSON.parse(routerMatch[1]);
+                        const trackData = data?.loaderData?.track_page?.audioWithLyricsOption;
+                        if (trackData?.url && isValidMediaUrl(trackData.url)) {
+                            results.push({
+                                url: trackData.url,
+                                title: trackData.trackName,
+                                artist: trackData.artistName,
+                                cover: trackData.coverURL,
+                                source: '_ROUTER_DATA JSON'
+                            });
+                        }
+                        const videoData = data?.loaderData?.ugc_video_page?.videoOptions;
+                        if (videoData?.url && isValidMediaUrl(videoData.url)) {
+                            results.push({
+                                url: videoData.url,
+                                title: videoData.videoName || videoData.artistName,
+                                artist: videoData.artistName,
+                                cover: videoData.coverURL,
+                                source: 'ugc_video JSON'
+                            });
+                        }
+                    } catch (e) {}
+                }
+
+                const urlMatches = content.matchAll(/"url"\s*:\s*"([^"]+)/g);
+                for (const match of urlMatches) {
+                    let url = match[1].replace(/\\u002F/g, '/');
+                    if (isValidMediaUrl(url)) {
+                        let title = '未知歌曲';
+                        const titleMatch = content.match(/"trackName"\s*:\s*"([^"]+)/);
+                        if (titleMatch) title = titleMatch[1];
+                        else {
+                            const vnameMatch = content.match(/"videoName"\s*:\s*"([^"]+)/);
+                            if (vnameMatch) title = vnameMatch[1];
+                        }
+                        let artist = '未知作者';
+                        const artistMatch = content.match(/"artistName"\s*:\s*"([^"]+)/);
+                        if (artistMatch) artist = artistMatch[1];
+                        results.push({
+                            url: url,
+                            title: title,
+                            artist: artist,
+                            source: '正则提取'
+                        });
+                    }
+                }
+            }
+
+            if (content.includes('douyinvod.com') || content.includes('audio/mp4') || content.includes('v5-luna')) {
+                log(`屎山代码成功发力😋找到包含音视频的部分 #${index}`);
+                const urlMatches = content.matchAll(/(https?:\\?\/\\?\/[^"'\s]+(?:douyinvod\.com|v5-luna\.douyinvod\.com)[^"'\s]+)/g);
+                for (const match of urlMatches) {
+                    let url = match[1].replace(/\\u002F/g, '/').replace(/\\\//g, '/');
+                    if (isValidMediaUrl(url)) {
+                        results.push({
+                            url: url,
+                            title: '未知歌曲',
+                            artist: '未知作者',
+                            source: '脚本URL匹配'
+                        });
+                    }
+                }
+            }
+        });
+
+        const audioEls = document.querySelectorAll('audio');
+        audioEls.forEach((audio, index) => {
+            if (audio.src && isValidMediaUrl(audio.src)) {
+                results.push({
+                    url: audio.src,
+                    title: audio.title || '未知歌曲',
+                    artist: '未知作者',
+                    source: `audio标签 #${index}`
+                });
+            }
+        });
+
+        const videoEls = document.querySelectorAll('video');
+        videoEls.forEach((video, index) => {
+            if (video.src && isValidMediaUrl(video.src)) {
+                results.push({
+                    url: video.src,
+                    title: video.title || '未知歌曲',
+                    artist: '未知作者',
+                    source: `video标签 #${index}`
+                });
+                if (!extractedCover && video.poster && !isInvalidCover(video.poster)) extractedCover = video.poster;
+            }
+        });
+
+        const elementsWithSrc = document.querySelectorAll('[src]');
+        elementsWithSrc.forEach(el => {
+            const src = el.getAttribute('src');
+            if (src && isValidMediaUrl(src)) {
+                results.push({
+                    url: src,
+                    title: el.title || '未知歌曲',
+                    artist: '未知作者',
+                    source: '元素src属性'
+                });
+            }
+        });
+
+        const allElements = document.querySelectorAll('*');
+        allElements.forEach(el => {
+            const attributes = el.attributes;
+            for (let attr of attributes) {
+                if (attr.name.startsWith('data-') && attr.value && isValidMediaUrl(attr.value)) {
+                    results.push({
+                        url: attr.value,
+                        title: '未知歌曲',
+                        artist: '未知作者',
+                        source: `data属性: ${attr.name}`
+                    });
+                }
+            }
+        });
+
+        if (window.performance && window.performance.getEntries) {
+            const entries = window.performance.getEntries();
+            entries.forEach(entry => {
+                if (entry.name && isValidMediaUrl(entry.name)) {
+                    results.push({
+                        url: entry.name,
+                        title: '未知歌曲',
+                        artist: '未知作者',
+                        source: '网络请求'
+                    });
+                }
+            });
+        }
+
+        const uniqueResults = [];
+        const seenUrls = new Set();
+        results.forEach(item => {
+            if (item.url && !seenUrls.has(item.url)) {
+                seenUrls.add(item.url);
+                uniqueResults.push(item);
+            }
+        });
+
+        if (uniqueResults.length > 0) {
+            log(`找到 ${uniqueResults.length} 个唯一音视频链接`);
+            const bestMatch = uniqueResults.find(r => r.title !== '未知歌曲') || uniqueResults[0];
+            audioInfo = {
+                url: bestMatch.url,
+                title: bestMatch.title,
+                artist: bestMatch.artist,
+                cover: extractedCover,
+                found: true
+            };
+            log('屎山代码匹配成功😋:', audioInfo);
+            return true;
+        }
+
+        log('屎山代码炸了😨啥也没找到🧐');
+        return false;
+    }
+
+    function createDownloadButton() {
+        if (!audioInfo.found || !audioInfo.url) return;
+
+        if (document.getElementById('qishui-smart-downloader')) {
+            const infoDiv = document.getElementById('qishui-song-info');
+            if (infoDiv) {
+                infoDiv.innerHTML = `
+                    <div style="margin-bottom:3px;"><strong>${escapeHtml(audioInfo.title)}</strong></div>
+                    <div style="font-size:9px; opacity:0.7;">${escapeHtml(audioInfo.artist)}</div>
+                `;
+            }
+            return;
+        }
+
+        log('创建下载按钮👊');
+
+        const container = document.createElement('div');
+        container.id = 'qishui-smart-downloader';
+        container.style.cssText = `
+            position: fixed;
+            bottom: 16px;
+            left: 80px;
+            z-index: 999999;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 180px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            transform: translateX(120%);
+            animation: qishuiSpringIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        `;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes qishuiSpringIn {
+                0% { transform: translateX(120%); opacity: 0; }
+                100% { transform: translateX(0); opacity: 1; }
+            }
+        `;
+        document.head.appendChild(style);
+
+        const infoCard = document.createElement('div');
+        infoCard.id = 'qishui-song-info';
+        infoCard.style.cssText = `
+            background: rgba(29,29,31,0.92);
+            backdrop-filter: blur(12px);
+            color: #f5f5f7;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            border: 0.5px solid rgba(255,255,255,0.1);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            cursor: pointer;
+            line-height: 1.3;
+        `;
+        infoCard.innerHTML = `
+            <div style="margin-bottom:2px;"><strong>${escapeHtml(audioInfo.title)}</strong></div>
+            <div style="font-size:9px; opacity:0.7;">${escapeHtml(audioInfo.artist)}</div>
+        `;
+
+        const buttonGroup = document.createElement('div');
+        buttonGroup.style.cssText = `
+            display: flex;
+            gap: 6px;
+        `;
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.innerHTML = '⬇️';
+        downloadBtn.style.cssText = `
+            flex: 1;
+            padding: 8px 0;
+            background: #2997ff;
+            color: #000;
+            border: none;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(41,151,255,0.3);
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        `;
+
+        const copyBtn = document.createElement('button');
+        copyBtn.innerHTML = '🔗';
+        copyBtn.style.cssText = `
+            flex: 0 0 44px;
+            padding: 8px 0;
+            background: rgba(255,255,255,0.12);
+            color: #f5f5f7;
+            border: 0.5px solid rgba(255,255,255,0.15);
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        const beautyBtn = document.createElement('button');
+        beautyBtn.innerHTML = '🎨';
+        beautyBtn.style.cssText = `
+            flex: 0 0 44px;
+            padding: 8px 0;
+            background: rgba(255,255,255,0.12);
+            color: #f5f5f7;
+            border: 0.5px solid rgba(255,255,255,0.15);
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        [downloadBtn, copyBtn, beautyBtn].forEach(btn => {
+            btn.onmouseover = () => {
+                btn.style.transform = 'scale(1.02)';
+            };
+            btn.onmouseout = () => {
+                btn.style.transform = 'scale(1)';
+            };
+            btn.onmousedown = () => { btn.style.transform = 'scale(0.96)'; };
+            btn.onmouseup = () => { btn.style.transform = 'scale(1.02)'; };
+        });
+
+        downloadBtn.onclick = async () => {
+            const originalText = downloadBtn.innerHTML;
+            downloadBtn.innerHTML = '⏳';
+            downloadBtn.disabled = true;
+
+            try {
+                const filename = `${audioInfo.title}_${audioInfo.artist}-ZynSync提供下载.mp3`
+                    .replace(/[\\/*?:"<>|]/g, '_')
+                    .substring(0, 100);
+
+                let downloaded = false;
+
+                if (typeof GM_download !== 'undefined') {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            GM_download({
+                                url: audioInfo.url,
+                                name: filename,
+                                onload: resolve,
+                                onerror: reject,
+                                timeout: 30000
+                            });
+                        });
+                        downloaded = true;
+                    } catch (e) {
+                        log('GM_download失败:', e);
+                    }
+                }
+
+                if (!downloaded && typeof GM_xmlhttpRequest !== 'undefined') {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            GM_xmlhttpRequest({
+                                method: 'GET',
+                                url: audioInfo.url,
+                                responseType: 'blob',
+                                onload: (resp) => {
+                                    const blob = resp.response;
+                                    const blobUrl = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = blobUrl;
+                                    a.download = filename;
+                                    a.click();
+                                    URL.revokeObjectURL(blobUrl);
+                                    resolve();
+                                },
+                                onerror: reject
+                            });
+                        });
+                        downloaded = true;
+                    } catch (e) {
+                        log('GM_xmlhttpRequest失败:', e);
+                    }
+                }
+
+                if (!downloaded) {
+                    try {
+                        const response = await fetch(audioInfo.url, {
+                            mode: 'cors',
+                            credentials: 'omit'
+                        });
+                        const blob = await response.blob();
+                        const blobUrl = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = blobUrl;
+                        a.download = filename;
+                        a.click();
+                        URL.revokeObjectURL(blobUrl);
+                        downloaded = true;
+                    } catch (e) {
+                        log('fetch失败:', e);
+                    }
+                }
+
+                if (!downloaded) {
+                    window.open(audioInfo.url, '_blank');
+                    downloaded = true;
+                }
+
+                downloadBtn.innerHTML = '✅';
+                setTimeout(() => {
+                    downloadBtn.innerHTML = originalText;
+                    downloadBtn.disabled = false;
+                }, 1500);
+
+            } catch (error) {
+                console.error('下载失败:', error);
+                downloadBtn.innerHTML = '❌';
+                setTimeout(() => {
+                    downloadBtn.innerHTML = originalText;
+                    downloadBtn.disabled = false;
+                }, 1500);
+            }
+        };
+
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(audioInfo.url).then(() => {
+                const originalText = copyBtn.innerHTML;
+                copyBtn.innerHTML = '✅';
+                setTimeout(() => {
+                    copyBtn.innerHTML = originalText;
+                }, 1000);
+            }).catch(() => {
+                prompt('链接:', audioInfo.url);
+            });
+        };
+
+        beautyBtn.onclick = () => {
+            replaceWithBeautyPlayer();
+        };
+
+        infoCard.onclick = () => {
+            alert(`歌曲：${audioInfo.title}\n作者：${audioInfo.artist}`);
+        };
+
+        buttonGroup.appendChild(downloadBtn);
+        buttonGroup.appendChild(copyBtn);
+        buttonGroup.appendChild(beautyBtn);
+        container.appendChild(infoCard);
+        container.appendChild(buttonGroup);
+        document.body.appendChild(container);
+
+        if (typeof GM_notification !== 'undefined') {
+            GM_notification({
+                text: `找到: ${audioInfo.title}`,
+                title: '汽水音乐',
+                timeout: 2000
+            });
+        }
+    }
+
+    function replaceWithBeautyPlayer() {
+        if (!audioInfo.url) {
+            if (!searchAudioInPage()) {
+                alert('未找到音频链接，请刷新页面重试');
+                return;
+            }
+        }
+
+        let coverImage = audioInfo.cover;
+        if (!coverImage || isInvalidCover(coverImage)) {
+            coverImage = extractCoverFromPage();
+            if (!coverImage || isInvalidCover(coverImage)) {
+                coverImage = '';
+            }
+        }
+
+        const audioUrl = audioInfo.url;
+        const songTitle = escapeHtml(audioInfo.title);
+        const songArtist = escapeHtml(audioInfo.artist);
+
+        const playerHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>${songTitle} - 汽水音乐</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        body {
+            min-height: 100vh;
+            background: linear-gradient(145deg, #0a0a0a 0%, #111111 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            padding: 24px;
+        }
+        .player {
+            max-width: 480px;
+            width: 100%;
+            background: rgba(20, 20, 20, 0.7);
+            backdrop-filter: blur(18px);
+            border-radius: 48px;
+            box-shadow: 0 25px 45px -12px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+            padding: 32px 28px 38px 28px;
+            transition: all 0.4s cubic-bezier(0.2, 0.9, 0.4, 1.1);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .artwork-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 32px;
+            perspective: 800px;
+        }
+        .artwork-frame {
+            width: 240px;
+            height: 240px;
+            border-radius: 36px;
+            background: #0c0c0c;
+            box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.02);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            will-change: transform;
+            transform-origin: center center;
+        }
+        .cover-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .track-info {
+            text-align: center;
+            margin-bottom: 28px;
+            animation: fadeSlideUp 0.6s ease-out;
+        }
+        .track-title {
+            font-size: 1.7rem;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+            color: #f5f5f5;
+            margin-bottom: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding: 0 8px;
+        }
+        .track-artist {
+            font-size: 0.9rem;
+            font-weight: 400;
+            color: #aaa;
+            letter-spacing: 0.2px;
+        }
+        .progress-area {
+            margin-bottom: 28px;
+        }
+        .progress-bar-bg {
+            background: #2a2a2a;
+            border-radius: 100px;
+            height: 5px;
+            width: 100%;
+            cursor: pointer;
+            position: relative;
+            transition: height 0.2s;
+        }
+        .progress-bar-bg:hover {
+            height: 7px;
+        }
+        .progress-fill {
+            background: #ffffff;
+            border-radius: 100px;
+            width: 0%;
+            height: 100%;
+            position: relative;
+            transition: width 0.05s linear;
+            box-shadow: 0 0 6px rgba(255,255,255,0.6);
+        }
+        .time-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: #aaa;
+            letter-spacing: 0.3px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 28px;
+            margin-bottom: 24px;
+        }
+        .ctrl-btn {
+            background: rgba(30, 30, 30, 0.9);
+            border: none;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.25s cubic-bezier(0.2, 0.9, 0.4, 1.1);
+            backdrop-filter: blur(4px);
+            box-shadow: 0 6px 12px -6px rgba(0,0,0,0.4);
+            color: #f0f0f0;
+        }
+        .ctrl-btn svg {
+            width: 26px;
+            height: 26px;
+            stroke-width: 1.5;
+            stroke: #fff;
+            fill: none;
+        }
+        .ctrl-btn.play-btn svg {
+            fill: #fff;
+            stroke: none;
+        }
+        .ctrl-btn:active {
+            transform: scale(0.94);
+            background: rgba(20,20,20,0.95);
+        }
+        .ctrl-btn:hover {
+            background: #3a3a3a;
+            transform: scale(1.02);
+        }
+        .import-area {
+            text-align: center;
+            margin-top: 10px;
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .file-label, .download-current {
+            background: transparent;
+            border: 1.5px solid rgba(255, 255, 255, 0.25);
+            border-radius: 60px;
+            padding: 10px 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #e0e0e0;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            backdrop-filter: blur(5px);
+            transition: all 0.25s ease;
+            letter-spacing: 0.3px;
+        }
+        .file-label:hover, .download-current:hover {
+            border-color: #fff;
+            background: rgba(255,255,255,0.05);
+            color: white;
+            transform: scale(0.98);
+        }
+        .file-label svg, .download-current svg {
+            width: 18px;
+            height: 18px;
+            stroke: #ccc;
+            stroke-width: 1.7;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .pulse-hint {
+            font-size: 0.7rem;
+            text-align: center;
+            margin-top: 22px;
+            color: #5a5a5a;
+            letter-spacing: 0.3px;
+        }
+        @keyframes fadeSlideUp {
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @media (max-width: 480px) {
+            .player {
+                padding: 24px 20px 32px 20px;
+            }
+            .artwork-frame {
+                width: 200px;
+                height: 200px;
+                border-radius: 28px;
+            }
+            .track-title {
+                font-size: 1.4rem;
+            }
+            .ctrl-btn {
+                width: 48px;
+                height: 48px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="player">
+    <div class="artwork-container">
+        <div class="artwork-frame" id="artworkFrame">
+            <img id="coverImage" class="cover-img" alt="album cover">
+        </div>
+    </div>
+    <div class="track-info">
+        <div id="trackTitle" class="track-title">${songTitle}</div>
+        <div id="trackArtist" class="track-artist">${songArtist}</div>
+    </div>
+    <div class="progress-area">
+        <div id="progressBarBg" class="progress-bar-bg">
+            <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div class="time-labels">
+            <span id="currentTime">0:00</span>
+            <span id="durationTime">0:00</span>
+        </div>
+    </div>
+    <div class="controls">
+        <button id="prevBtn" class="ctrl-btn" aria-label="上一首">
+            <svg viewBox="0 0 24 24" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="19 20 9 12 19 4 19 20" fill="none" />
+                <line x1="5" y1="4" x2="5" y2="20" />
+            </svg>
+        </button>
+        <button id="playBtn" class="ctrl-btn play-btn">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z" />
+            </svg>
+        </button>
+        <button id="nextBtn" class="ctrl-btn" aria-label="下一首">
+            <svg viewBox="0 0 24 24" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 4 15 12 5 20 5 4" fill="none" />
+                <line x1="19" y1="4" x2="19" y2="20" />
+            </svg>
+        </button>
+    </div>
+    <div class="import-area">
+        <label for="mp3Upload" class="file-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M12 3v12m0 0-3-3m3 3 3-3M5 21h14" stroke-linecap="round"/>
+                <rect x="3" y="15" width="18" height="4" rx="1" stroke="currentColor" fill="none"/>
+            </svg>
+            <span>导入 MP3</span>
+        </label>
+        <input type="file" id="mp3Upload" accept=".mp3,audio/mpeg,audio/mp3" multiple>
+        <button id="downloadCurrentBtn" class="download-current">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M12 3v12m0 0-3-3m3 3 3-3M5 21h14" stroke-linecap="round"/>
+                <rect x="3" y="15" width="18" height="4" rx="1" stroke="currentColor" fill="none"/>
+            </svg>
+            <span>下载</span>
+        </button>
+    </div>
+    <div class="pulse-hint">
+        ✦ ZYNSYNC · 汽水音乐 ✦
+    </div>
+</div>
+<script>
+    const audio = new Audio();
+    let audioContext = null;
+    let sourceNode = null;
+    let analyserNode = null;
+    let animationFrameId = null;
+    let isAudioContextReady = false;
+
+    const artworkFrame = document.getElementById('artworkFrame');
+    const coverImg = document.getElementById('coverImage');
+    const trackTitleEl = document.getElementById('trackTitle');
+    const trackArtistEl = document.getElementById('trackArtist');
+    const progressFill = document.getElementById('progressFill');
+    const progressBarBg = document.getElementById('progressBarBg');
+    const currentTimeEl = document.getElementById('currentTime');
+    const durationTimeEl = document.getElementById('durationTime');
+    const playBtn = document.getElementById('playBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const fileInput = document.getElementById('mp3Upload');
+    const downloadCurrentBtn = document.getElementById('downloadCurrentBtn');
+
+    let isPlaying = false;
+    let currentTrackList = [];
+    let currentTrackIndex = -1;
+
+    let smoothScale = 1;
+    let smoothRotate = 0;
+    let phase = 0;
+    let filteredRotateAmp = 0;
+
+    function formatTime(seconds) {
+        if (isNaN(seconds)) return "0:00";
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return mins + ":" + (secs < 10 ? "0" : "") + secs;
+    }
+
+    function updateProgress() {
+        if (audio.duration && !isNaN(audio.duration)) {
+            const percent = (audio.currentTime / audio.duration) * 100;
+            progressFill.style.width = percent + "%";
+            currentTimeEl.textContent = formatTime(audio.currentTime);
+            durationTimeEl.textContent = formatTime(audio.duration);
+        } else {
+            progressFill.style.width = "0%";
+            currentTimeEl.textContent = "0:00";
+            durationTimeEl.textContent = "0:00";
+        }
+    }
+
+    function generateDefaultCover(songName = '') {
+        const canvas = document.createElement('canvas');
+        canvas.width = 500;
+        canvas.height = 500;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#0a0a0a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        for (let i = 1; i <= 3; i++) {
+            ctx.beginPath();
+            ctx.arc(canvas.width/2, canvas.height/2, 50 * i, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.fillStyle = '#f0f0f0';
+        ctx.font = '500 ' + (canvas.width * 0.12) + 'px "Inter", system-ui';
+        ctx.fillText("♫", canvas.width/2 - 35, canvas.height/2 + 20);
+        if (songName && songName.length > 0) {
+            ctx.font = (canvas.width * 0.045) + 'px "Inter"';
+            ctx.fillStyle = '#cccccc';
+            let shortName = songName.length > 12 ? songName.slice(0,10)+'..' : songName;
+            ctx.fillText(shortName, canvas.width/2 - 40, canvas.height - 70);
+        }
+        return canvas.toDataURL();
+    }
+
+    async function loadAudioFromFile(file) {
+        if (!file) return false;
+        if (audio.src && audio.src.startsWith('blob:')) {
+            URL.revokeObjectURL(audio.src);
+        }
+        const url = URL.createObjectURL(file);
+        audio.src = url;
+        return new Promise((resolve) => {
+            audio.addEventListener('loadedmetadata', async () => {
+                let fileName = file.name.replace(/\\.mp3$/i, '').replace(/\\.m4a$/i, '').replace(/\\.wav$/i, '');
+                trackTitleEl.textContent = fileName.length > 30 ? fileName.substring(0,28)+'...' : fileName;
+                trackArtistEl.textContent = "本地音乐 · 律动随行";
+                const coverUrl = generateDefaultCover(fileName);
+                coverImg.src = coverUrl;
+                durationTimeEl.textContent = formatTime(audio.duration);
+                updateProgress();
+                resolve(true);
+            }, { once: true });
+            audio.addEventListener('error', () => {
+                console.error("音频加载失败");
+                trackTitleEl.textContent = "加载失败";
+                trackArtistEl.textContent = "请尝试其他 MP3 文件";
+                resolve(false);
+            });
+            audio.load();
+        });
+    }
+
+    async function initAudioContextAndAnalyser() {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+        if (sourceNode) {
+            try { sourceNode.disconnect(); } catch(e) {}
+        }
+        if (analyserNode) {
+            try { analyserNode.disconnect(); } catch(e) {}
+        }
+        if (audio.src) {
+            try {
+                sourceNode = audioContext.createMediaElementSource(audio);
+                analyserNode = audioContext.createAnalyser();
+                analyserNode.fftSize = 256;
+                sourceNode.connect(analyserNode);
+                analyserNode.connect(audioContext.destination);
+                isAudioContextReady = true;
+                startBeatAnimation();
+            } catch(e) {
+                console.warn("无法建立音频分析节点，律动效果可能失效", e);
+                isAudioContextReady = false;
+            }
+        }
+    }
+
+    function startBeatAnimation() {
+        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        function animateBeat() {
+            if (!analyserNode || !isAudioContextReady || !audio.src || audio.paused) {
+                smoothScale = 1;
+                smoothRotate = 0;
+                filteredRotateAmp = 0;
+                artworkFrame.style.transform = 'scale(1) rotate(0deg)';
+                animationFrameId = requestAnimationFrame(animateBeat);
+                return;
+            }
+            const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+            analyserNode.getByteTimeDomainData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                let v = (dataArray[i] - 128) / 128;
+                sum += v * v;
+            }
+            let avg = Math.sqrt(sum / dataArray.length);
+            let intensity = Math.min(0.45, avg * 1.8);
+            let targetScale = 1 + intensity * 0.55;
+            let targetRotateAmp = intensity * 7.5;
+            filteredRotateAmp = filteredRotateAmp * 0.92 + targetRotateAmp * 0.08;
+            smoothScale = smoothScale * 0.88 + targetScale * 0.12;
+            phase += 0.18;
+            let rotateVal = Math.sin(phase) * filteredRotateAmp;
+            smoothRotate = smoothRotate * 0.86 + rotateVal * 0.14;
+            artworkFrame.style.transform = 'scale(' + smoothScale + ') rotate(' + smoothRotate + 'deg)';
+            animationFrameId = requestAnimationFrame(animateBeat);
+        }
+        animateBeat();
+    }
+
+    async function togglePlay() {
+        if (!audio.src || audio.src === '') {
+            trackTitleEl.textContent = "请先导入音乐";
+            trackArtistEl.textContent = "点击下方按钮选择 MP3 文件";
+            return;
+        }
+        if (isPlaying) {
+            audio.pause();
+            isPlaying = false;
+            updatePlayButtonUI(false);
+        } else {
+            if (audioContext && audioContext.state === 'suspended') {
+                await audioContext.resume();
+            } else if (!audioContext) {
+                await initAudioContextAndAnalyser();
+            } else if (!analyserNode) {
+                await initAudioContextAndAnalyser();
+            }
+            await audio.play().catch(e => {
+                console.log("播放失败:", e);
+                trackArtistEl.textContent = "请先点击页面激活音频";
+            });
+            isPlaying = true;
+            updatePlayButtonUI(true);
+        }
+    }
+
+    function updatePlayButtonUI(playing) {
+        if (playing) {
+            playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>';
+        } else {
+            playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>';
+        }
+    }
+
+    function prevTrack() {
+        if (currentTrackList.length === 0) return;
+        currentTrackIndex = (currentTrackIndex - 1 + currentTrackList.length) % currentTrackList.length;
+        loadAndPlayTrack(currentTrackIndex);
+    }
+
+    function nextTrack() {
+        if (currentTrackList.length === 0) return;
+        currentTrackIndex = (currentTrackIndex + 1) % currentTrackList.length;
+        loadAndPlayTrack(currentTrackIndex);
+    }
+
+    async function loadAndPlayTrack(index) {
+        if (index < 0 || index >= currentTrackList.length) return;
+        const fileOrUrl = currentTrackList[index];
+        if (typeof fileOrUrl === 'string') {
+            if (audio.src && audio.src.startsWith('blob:')) {
+                URL.revokeObjectURL(audio.src);
+            }
+            audio.crossOrigin = 'anonymous';
+            audio.src = fileOrUrl;
+            await new Promise((resolve) => {
+                audio.addEventListener('loadedmetadata', () => {
+                    if (currentTrackList[index].title) {
+                        trackTitleEl.textContent = currentTrackList[index].title;
+                        trackArtistEl.textContent = currentTrackList[index].artist;
+                    }
+                    if (currentTrackList[index].cover && currentTrackList[index].cover !== '') {
+                        coverImg.src = currentTrackList[index].cover;
+                    } else {
+                        coverImg.src = generateDefaultCover(currentTrackList[index].title || '歌曲');
+                    }
+                    durationTimeEl.textContent = formatTime(audio.duration);
+                    updateProgress();
+                    resolve();
+                }, { once: true });
+                audio.load();
+            });
+        } else {
+            await loadAudioFromFile(fileOrUrl);
+        }
+        if (audioContext && audioContext.state === 'suspended') await audioContext.resume();
+        await audio.play().catch(e => console.log("播放:", e));
+        isPlaying = true;
+        updatePlayButtonUI(true);
+        if (!analyserNode && audioContext) await initAudioContextAndAnalyser();
+    }
+
+    async function handleFileUpload(e) {
+        const files = Array.from(e.target.files);
+        if (files.length === 0) return;
+        for (const file of files) {
+            currentTrackList.push(file);
+        }
+        if (currentTrackIndex === -1) {
+            currentTrackIndex = 0;
+            await loadAndPlayTrack(0);
+        }
+        e.target.value = '';
+    }
+
+    function seek(e) {
+        if (!audio.duration || isNaN(audio.duration)) return;
+        const rect = progressBarBg.getBoundingClientRect();
+        const percent = (e.clientX - rect.left) / rect.width;
+        audio.currentTime = percent * audio.duration;
+        updateProgress();
+    }
+
+    async function downloadCurrentSong() {
+        if (!audio.src || audio.src === '') {
+            alert('没有正在播放的歌曲');
+            return;
+        }
+        let downloadUrl = audio.src;
+        let filename = (trackTitleEl.innerText || '歌曲') + '_' + (trackArtistEl.innerText || '未知') + '-ZynSync提供下载.mp3';
+        filename = filename.replace(/[\\\\/*?:"<>|]/g, '_');
+        try {
+            const response = await fetch(downloadUrl, { mode: 'cors', credentials: 'omit' });
+            if (!response.ok) throw new Error('下载失败');
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+        } catch (err) {
+            console.error(err);
+            alert('下载失败，可尝试右键另存');
+            window.open(downloadUrl, '_blank');
+        }
+    }
+
+    function setInitialTrack() {
+        const initSong = {
+            url: '${escapeHtml(audioUrl)}',
+            title: '${songTitle}',
+            artist: '${songArtist}',
+            cover: '${escapeHtml(coverImage)}'
+        };
+        if (initSong.url && initSong.url !== '') {
+            currentTrackList.push({
+                url: initSong.url,
+                title: initSong.title,
+                artist: initSong.artist,
+                cover: initSong.cover
+            });
+            currentTrackIndex = 0;
+            audio.crossOrigin = 'anonymous';
+            audio.src = initSong.url;
+            audio.addEventListener('loadedmetadata', () => {
+                trackTitleEl.textContent = initSong.title;
+                trackArtistEl.textContent = initSong.artist;
+                if (initSong.cover && initSong.cover !== '') {
+                    coverImg.src = initSong.cover;
+                } else {
+                    coverImg.src = generateDefaultCover(initSong.title);
+                }
+                coverImg.onerror = () => {
+                    coverImg.src = generateDefaultCover(initSong.title);
+                };
+                durationTimeEl.textContent = formatTime(audio.duration);
+                updateProgress();
+                initAudioContextAndAnalyser();
+            }, { once: true });
+            audio.load();
+        } else {
+            coverImg.src = generateDefaultCover('等待乐章');
+        }
+    }
+
+    audio.addEventListener('ended', () => {
+        if (currentTrackList.length > 1) {
+            nextTrack();
+        } else {
+            isPlaying = false;
+            updatePlayButtonUI(false);
+        }
+    });
+    audio.addEventListener('timeupdate', updateProgress);
+    progressBarBg.addEventListener('click', seek);
+    playBtn.addEventListener('click', togglePlay);
+    prevBtn.addEventListener('click', prevTrack);
+    nextBtn.addEventListener('click', nextTrack);
+    fileInput.addEventListener('change', handleFileUpload);
+    downloadCurrentBtn.addEventListener('click', downloadCurrentSong);
+    document.body.addEventListener('click', () => {
+        if (audioContext && audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+    });
+    setInitialTrack();
+<\/script>
+</body>
+</html>`;
+
+        document.documentElement.innerHTML = playerHTML;
+        document.open();
+        document.write(playerHTML);
+        document.close();
+        if (typeof GM_notification !== 'undefined') {
+            GM_notification({
+                text: '已切换至播放器',
+                title: '汽水音乐',
+                timeout: 1500
+            });
+        }
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function startSearching() {
+        let searchCount = 0;
+        const startTime = Date.now();
+
+        const searchInterval = setInterval(() => {
+            searchCount++;
+            const elapsed = Date.now() - startTime;
+
+            log(`第 ${searchCount} 次搜索 (已搜索 ${elapsed}ms)`);
+
+            if (searchAudioInPage()) {
+                log(`✅ 在第 ${searchCount} 次搜索成功！`);
+                clearInterval(searchInterval);
+                createDownloadButton();
+            } else if (elapsed > CONFIG.maxSearchTime) {
+                log(`❌ 搜索超时 (${CONFIG.maxSearchTime}ms)`);
+                clearInterval(searchInterval);
+                createManualSearchButton();
+            }
+        }, CONFIG.searchInterval);
+    }
+
+    function createManualSearchButton() {
+        if (document.getElementById('qishui-manual-search')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'qishui-manual-search';
+        btn.innerHTML = '🔍';
+        btn.style.cssText = `
+            position: fixed;
+            bottom: 16px;
+            right: 12px;
+            z-index: 999999;
+            width: 44px;
+            height: 44px;
+            background: rgba(255,255,255,0.12);
+            color: #f5f5f7;
+            border: 0.5px solid rgba(255,255,255,0.15);
+            border-radius: 50%;
+            font-size: 20px;
+            font-weight: 500;
+            cursor: pointer;
+            backdrop-filter: blur(12px);
+            transition: all 0.2s;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            transform: translateX(120%);
+            animation: qishuiSpringIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        btn.onclick = () => {
+            if (searchAudioInPage()) {
+                createDownloadButton();
+                btn.remove();
+            } else {
+                alert('未找到音频链接，请刷新页面重试');
+            }
+        };
+
+        document.body.appendChild(btn);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startSearching);
+    } else {
+        startSearching();
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        if (!audioInfo.found) {
+            if (mutations.length > 10) {
+                searchAudioInPage();
+            }
+        }
+    });
+
+    if (document.body) {
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    } else {
+        document.addEventListener('DOMContentLoaded', () => {
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+        });
+    }
+
+    window.qishuiForceSearch = () => {
+        if (searchAudioInPage()) {
+            createDownloadButton();
+            return audioInfo;
+        }
+        return '未找到';
+    };
+
+    log('屎山代码已注入，输入 qishuiForceSearch() 可手动强制搜索');
+})();
